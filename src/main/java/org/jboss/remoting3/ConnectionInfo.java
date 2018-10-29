@@ -24,7 +24,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.wildfly.common.Assert;
 import org.wildfly.security.auth.client.AuthenticationConfiguration;
@@ -86,11 +85,35 @@ final class ConnectionInfo {
                     splice(futureResult, attempt, authenticationConfiguration);
                     attempt.addNotifier(new IoFuture.HandlingNotifier<Connection, Void>() {
                         public void handleCancelled(final Void attachment) {
-                            clear();
+                            final ConnectionInfo outer = ConnectionInfo.this;
+                            synchronized (outer) {
+                                assert state == maybeShared;
+                                state = None.this;
+                                synchronized (maybeShared.pendingAttempts) {
+                                    for (Map.Entry<AuthenticationConfiguration, FutureResult<Connection>> pendingAttempt : maybeShared.pendingAttempts.entrySet()) {
+                                        final AuthenticationConfiguration pendingAuthenticationConfiguration = pendingAttempt.getKey();
+                                        final FutureResult<Connection> pendingFutureResult = pendingAttempt.getValue();
+                                        final IoFuture<Connection> realAttempt = outer.getConnection(endpoint, key, pendingAuthenticationConfiguration, true);
+                                        splice(pendingFutureResult, realAttempt, pendingAuthenticationConfiguration);
+                                    }
+                                }
+                            }
                         }
 
                         public void handleFailed(final IOException exception, final Void attachment) {
-                            clear();
+                            final ConnectionInfo outer = ConnectionInfo.this;
+                            synchronized (outer) {
+                                assert state == maybeShared;
+                                state = None.this;
+                                synchronized (maybeShared.pendingAttempts) {
+                                    for (Map.Entry<AuthenticationConfiguration, FutureResult<Connection>> pendingAttempt : maybeShared.pendingAttempts.entrySet()) {
+                                        final AuthenticationConfiguration pendingAuthenticationConfiguration = pendingAttempt.getKey();
+                                        final FutureResult<Connection> pendingFutureResult = pendingAttempt.getValue();
+                                        final IoFuture<Connection> realAttempt = outer.getConnection(endpoint, key, pendingAuthenticationConfiguration, true);
+                                        splice(pendingFutureResult, realAttempt, pendingAuthenticationConfiguration);
+                                    }
+                                }
+                            }
                         }
 
                         public void handleDone(final Connection connection, final Void attachment) {
@@ -116,13 +139,6 @@ final class ConnectionInfo {
                             }
                         }
 
-                        private void clear() {
-                            final ConnectionInfo outer = ConnectionInfo.this;
-                            synchronized (outer) {
-                                assert state == maybeShared;
-                                state = None.this;
-                            }
-                        }
                     }, null);
                     state = maybeShared;
                     return futureResult.getIoFuture();
@@ -165,11 +181,9 @@ final class ConnectionInfo {
                     }
                     assert doConnect;
                     final IoFuture<Connection> ioFuture = futureResult.getIoFuture();
-                    final AtomicBoolean cancelFlag = new AtomicBoolean();
                     final FutureResult<Connection> finalFutureResult = futureResult;
                     futureResult.addCancelHandler(new Cancellable() {
                         public Cancellable cancel() {
-                            cancelFlag.set(true);
                             finalFutureResult.setCancelled();
                             return this;
                         }
